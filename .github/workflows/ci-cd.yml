@@ -124,7 +124,7 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-       run: bash scripts/ssm_deploy.sh
+        run: bash scripts/ssm_deploy.sh
 
       - name: Verify the live production site
         run: |
