@@ -1,0 +1,142 @@
+name: CI-CD Pipeline
+
+# Every push to main starts the pipeline.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:      # also lets you press "Run workflow" manually
+
+permissions:
+  contents: read
+
+# Never run two deployments at the same time
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- 1. UNIT TESTS
+  test:
+    name: 1. Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run unit tests (pipeline FAILS here if any test fails)
+        run: pytest -v
+
+  # ---------------------------------------------------------------- BONUS: DEVSECOPS
+  security:
+    name: 2. Security checks (DevSecOps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so the secret scanner can look at old commits too
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install security tools
+        run: pip install -r requirements-dev.txt
+      - name: SAST - Bandit static code analysis
+        run: bandit -r app.py -ll
+      - name: Dependency vulnerability scan - pip-audit
+        run: pip-audit -r requirements.txt
+      - name: Secret scanning - Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------- 3. BUILD + 4. STORE IN S3
+  build:
+    name: 3. Build and upload to S3
+    needs: [test, security]       # only runs if tests AND security checks passed
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      key: ${{ steps.meta.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version and file name
+        id: meta
+        run: |
+          VERSION=$(cat VERSION)
+          BUILD="${{ github.run_number }}-${GITHUB_SHA::7}"
+          echo "$BUILD" > BUILD
+          KEY="builds/foodapp-v${VERSION}-build${{ github.run_number }}.zip"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Building $KEY"
+
+      - name: Package the application
+        run: |
+          mkdir -p dist
+          zip -r "dist/build.zip" app.py VERSION BUILD requirements.txt deploy -x "*.pyc" "__pycache__/*"
+          unzip -l dist/build.zip
+
+      - name: Keep a copy in GitHub (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: foodapp-build
+          path: dist/build.zip
+          retention-days: 7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload build to S3
+        run: |
+          aws s3 cp dist/build.zip "s3://${{ secrets.S3_BUCKET }}/${{ steps.meta.outputs.key }}"
+          # "latest.txt" always points to the newest successful build; the server reads this file
+          echo "${{ steps.meta.outputs.key }}" | aws s3 cp - "s3://${{ secrets.S3_BUCKET }}/latest.txt"
+          echo "Uploaded to S3:"
+          aws s3 ls "s3://${{ secrets.S3_BUCKET }}/builds/"
+
+  # ---------------------------------------------------------------- 5. DEPLOY + 6. VERIFY
+  deploy:
+    name: 4. Deploy to EC2 and verify
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy the latest build from S3 to the EC2 server
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: ./scripts/ssm_deploy.sh
+
+      - name: Verify the live production site
+        run: |
+          EXPECTED="${{ needs.build.outputs.version }}"
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -fsS "${{ secrets.APP_URL }}/health" || true)
+            echo "Attempt $i: $RESPONSE"
+            if echo "$RESPONSE" | grep -q "\"version\":\"$EXPECTED\""; then
+              echo "LIVE: production is running version $EXPECTED"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Production is not serving version $EXPECTED"
+          exit 1
