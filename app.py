@@ -10,7 +10,7 @@ from flask import Flask, jsonify, render_template_string, request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # >>> Change this text (and the VERSION file) to make a visible change for the demo <<<
-BANNER = "Welcome to Karachi Kitchen - v1.1 is live!"
+BANNER = "Welcome to Karachi Kitchen - v1.2 is live!"
 
 MENU = [
     {"id": 1, "name": "Chicken Biryani", "price": 500},
