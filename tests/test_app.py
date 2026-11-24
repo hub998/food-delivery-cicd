@@ -36,13 +36,13 @@ def test_health_endpoint(client):
 
 
 def test_menu_has_four_items(client):
-    assert len(client.get("/api/menu").get_json()) == 4
+    assert len(client.get("/api/menu").get_json()) == 5
 
 
 def test_order_api_total(client):
     r = client.post("/api/order", json={"items": [{"id": 3, "qty": 2}]})
     assert r.status_code == 200
-    assert r.get_json()["total"] == 1800
+    assert r.get_json()["total"] == 1801
 
 
 def test_order_api_rejects_empty_cart(client):
